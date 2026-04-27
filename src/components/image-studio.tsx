@@ -794,6 +794,39 @@ function appendRemixInstruction(prompt: string, instruction: string) {
   return `${trimmedPrompt}\n\n${instruction}`
 }
 
+function getReferenceUploadLimit(activeSource: ActiveSource | null) {
+  return Math.max(MAX_UPLOADS - (activeSource ? 1 : 0), 0)
+}
+
+function splitUploadsByLimit(uploads: UploadPreview[], limit: number) {
+  return {
+    overflow: uploads.slice(limit),
+    visible: uploads.slice(0, limit),
+  }
+}
+
+function buildRequestPrompt(prompt: string, activeSource: ActiveSource | null) {
+  const trimmedPrompt = prompt.trim()
+
+  if (!activeSource) {
+    return trimmedPrompt
+  }
+
+  const sourceContext = activeSource.promptSnapshot.trim()
+  const sections = [
+    "Use the first input image as the primary source image.",
+    "Preserve the overall composition, framing, lighting, styling, and layout unless the request below explicitly asks for changes.",
+  ]
+
+  if (sourceContext && sourceContext !== trimmedPrompt) {
+    sections.push(`Source image context:\n${sourceContext}`)
+  }
+
+  sections.push(`Requested changes:\n${trimmedPrompt}`)
+
+  return sections.join("\n\n")
+}
+
 function getUploadType(outputFormat: string, blobType: string) {
   if (ACCEPTED_TYPES.has(blobType)) {
     return blobType
@@ -1097,6 +1130,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
   const selectedImageNumber = selectedImage ? Math.min(selectedImageIndex, (result?.images.length || 1) - 1) + 1 : 0
   const inputUploads = activeSource ? [activeSource.upload, ...uploads] : uploads
   const inputUploadCount = inputUploads.length
+  const maxReferenceUploads = getReferenceUploadLimit(activeSource)
   const nextGeneration = activeSource ? activeSource.round + 1 : 1
 
   useEffect(() => {
@@ -1191,20 +1225,19 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
 
     setUploads((current) => {
       const merged = [...current, ...accepted]
-      const visible = merged.slice(0, MAX_UPLOADS)
-      const overflow = merged.slice(MAX_UPLOADS)
+      const { overflow, visible } = splitUploadsByLimit(merged, maxReferenceUploads)
 
       for (const upload of overflow) {
         URL.revokeObjectURL(upload.url)
       }
 
       if (overflow.length) {
-        toast.warning(t(locale, "maxUploadsWarning", { count: MAX_UPLOADS }))
+        toast.warning(t(locale, "maxUploadsWarning", { count: maxReferenceUploads }))
       }
 
       return visible
     })
-  }, [locale])
+  }, [locale, maxReferenceUploads])
 
   const handleReferenceDragEnter = useCallback((event: DragEvent<HTMLButtonElement>) => {
     event.preventDefault()
@@ -1298,18 +1331,33 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
         locale,
         outputFormat: result?.outputFormat || outputFormat,
       })
+      const nextSource: ActiveSource = {
+        label: `${workflow.sourceReady} · ${String(index + 1).padStart(2, "0")}`,
+        promptSnapshot: image.revisedPrompt || result?.prompt || prompt.trim(),
+        round: result?.generation || 1,
+        upload,
+      }
 
       setActiveSource((current) => {
         if (current) {
           URL.revokeObjectURL(current.upload.url)
         }
 
-        return {
-          label: `${workflow.sourceReady} · ${String(index + 1).padStart(2, "0")}`,
-          promptSnapshot: image.revisedPrompt || result?.prompt || prompt.trim(),
-          round: result?.generation || 1,
-          upload,
+        return nextSource
+      })
+      setUploads((current) => {
+        const nextLimit = getReferenceUploadLimit(nextSource)
+        const { overflow, visible } = splitUploadsByLimit(current, nextLimit)
+
+        for (const extraUpload of overflow) {
+          URL.revokeObjectURL(extraUpload.url)
         }
+
+        if (overflow.length) {
+          toast.warning(t(locale, "maxUploadsWarning", { count: nextLimit }))
+        }
+
+        return visible
       })
       setSelectedImageIndex(index)
 
@@ -1340,6 +1388,8 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
 
   async function callProxy(requestedCount: number): Promise<{ endpoint: string; images: GeneratedImage[] }> {
     const formData = new FormData()
+    const requestPrompt = buildRequestPrompt(prompt, activeSource)
+
     formData.append("apiKey", apiKey.trim())
     formData.append("background", background)
     formData.append("endpoint", endpoint.trim())
@@ -1347,7 +1397,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
     formData.append("locale", locale)
     formData.append("model", model)
     formData.append("outputFormat", outputFormat)
-    formData.append("prompt", prompt.trim())
+    formData.append("prompt", requestPrompt)
     formData.append("quality", quality)
     formData.append("size", size)
 
@@ -1400,6 +1450,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
     setIsGenerating(true)
     setProgress(8)
     setResult(null)
+    setSelectedImageIndex(0)
 
     const total = Math.min(Math.max(imageCount, 1), 4)
     let collectedEndpoint = ""
@@ -1410,31 +1461,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
       const maxAttempts = total + 2
       let attempts = 0
 
-      while (images.length < total && attempts < maxAttempts) {
-        attempts += 1
-
-        try {
-          const topUp = await callProxy(1)
-          collectedEndpoint = topUp.endpoint
-          images.push(...topUp.images.slice(0, total - images.length))
-        } catch (error) {
-          if (!firstError) {
-            firstError = error
-          }
-        }
-
-        setProgress(Math.min(95, 8 + Math.round((images.length / total) * 87)))
-      }
-
-      if (!images.length) {
-        throw firstError instanceof Error
-          ? firstError
-          : new Error(text.allRequestsFailed)
-      }
-
-      const visibleImages = images.slice(0, total)
-
-      setResult({
+      const createResult = (visibleImages: GeneratedImage[]): StudioResponse => ({
         endpoint: collectedEndpoint,
         generation: nextGeneration,
         images: visibleImages,
@@ -1446,7 +1473,52 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
         size,
         sourceLabel: activeSource?.label,
       })
-      setSelectedImageIndex(0)
+
+      const publishResult = () => {
+        const visibleImages = images.slice(0, total)
+
+        if (!visibleImages.length) {
+          return
+        }
+
+        setResult(createResult(visibleImages))
+        setSelectedImageIndex((current) => current < visibleImages.length ? current : 0)
+        setProgress(Math.min(95, 8 + Math.round((visibleImages.length / total) * 87)))
+      }
+
+      const runRequest = async () => {
+        try {
+          const topUp = await callProxy(1)
+          collectedEndpoint = topUp.endpoint
+
+          if (images.length < total) {
+            images.push(...topUp.images.slice(0, total - images.length))
+            publishResult()
+          }
+        } catch (error) {
+          if (!firstError) {
+            firstError = error
+          }
+        }
+      }
+
+      while (images.length < total && attempts < maxAttempts) {
+        const batchSize = Math.min(total - images.length, maxAttempts - attempts)
+        attempts += batchSize
+
+        await Promise.all(Array.from({ length: batchSize }, runRequest))
+      }
+
+      if (!images.length) {
+        throw firstError instanceof Error
+          ? firstError
+          : new Error(text.allRequestsFailed)
+      }
+
+      const visibleImages = images.slice(0, total)
+
+      setResult(createResult(visibleImages))
+      setSelectedImageIndex((current) => current < visibleImages.length ? current : 0)
       setProgress(100)
 
       if (visibleImages.length < total && firstError) {
@@ -1570,49 +1642,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
           className="studio-panel relative flex flex-col overflow-hidden rounded-lg backdrop-blur-xl lg:max-h-[calc(100vh-102px)]"
         >
           <div className="flex flex-col gap-5 overflow-y-auto px-4 py-4">
-            {activeSource && (
-              <Section
-                index="00"
-                title={workflow.activeSource}
-                hint={workflow.sourceRound.replace("{round}", String(activeSource.round))}
-              >
-                <div className="studio-accent-card overflow-hidden rounded-xl border shadow-sm">
-                  <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-3 p-3">
-                    <div className="overflow-hidden rounded-2xl bg-muted">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        alt={workflow.activeSource}
-                        className="aspect-square w-full object-cover"
-                        src={activeSource.upload.url}
-                      />
-                    </div>
-                    <div className="flex min-w-0 flex-col justify-between gap-3">
-                      <div>
-                        <Badge className="mb-2 rounded-md">
-                          <Layers3Icon data-icon="inline-start" />
-                          {workflow.sourceReady}
-                        </Badge>
-                        <p className="line-clamp-3 text-xs leading-5 text-foreground/78">
-                          {activeSource.promptSnapshot}
-                        </p>
-                      </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-9 w-fit rounded-md"
-                        onClick={clearActiveSource}
-                      >
-                        <XIcon data-icon="inline-start" />
-                        {workflow.clearSource}
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              </Section>
-            )}
-
-            <Section index="01" title={text.sectionPromptTitle} hint={text.sectionPromptHint}>
+            <Section index="00" title={text.sectionPromptTitle} hint={text.sectionPromptHint}>
               <FieldGroup>
                 <Field>
                   <Textarea
@@ -1643,9 +1673,9 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
             </Section>
 
             <Section
-              index="02"
+              index="01"
               title={text.sectionReferencesTitle}
-              hint={`${uploads.length} / ${MAX_UPLOADS}`}
+              hint={`${inputUploadCount} / ${MAX_UPLOADS}`}
             >
               <FieldGroup>
                 <button
@@ -1677,8 +1707,32 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
                   }}
                 />
 
-                {uploads.length > 0 && (
+                {inputUploadCount > 0 && (
                   <div className="grid grid-cols-2 gap-2">
+                    {activeSource && (
+                      <div className="group relative overflow-hidden rounded-md border bg-muted/30 shadow-sm">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          alt={workflow.activeSource}
+                          className="aspect-[4/3] w-full object-cover"
+                          src={activeSource.upload.url}
+                        />
+                        <div className="flex items-center justify-between gap-2 px-3 py-2 text-[11px]">
+                          <Badge variant="secondary" className="rounded-md px-2 py-0.5 text-[10px]">
+                            <Layers3Icon data-icon="inline-start" />
+                            {workflow.sourceReady}
+                          </Badge>
+                          <button
+                            type="button"
+                            aria-label={workflow.clearSource}
+                            onClick={clearActiveSource}
+                            className="inline-flex size-10 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                          >
+                            <XIcon className="size-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     {uploads.map((upload) => (
                       <div
                         key={upload.id}
@@ -1710,7 +1764,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
               </FieldGroup>
             </Section>
 
-            <Section index="03" title={text.sectionOutputTitle} hint={text.sectionOutputHint}>
+            <Section index="02" title={text.sectionOutputTitle} hint={text.sectionOutputHint}>
               <FieldGroup>
                 <Field data-invalid={isCustomSize && !customSizeValue ? true : undefined}>
                   <FieldLabel className="text-xs font-semibold text-muted-foreground">
@@ -1856,7 +1910,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
               </FieldGroup>
             </Section>
 
-            <Section index="04" title={text.sectionConnectionTitle} hint={text.sectionConnectionHint}>
+            <Section index="03" title={text.sectionConnectionTitle} hint={text.sectionConnectionHint}>
               <FieldGroup>
                 <Field>
                   <FieldLabel className="text-xs font-semibold text-muted-foreground">
@@ -2013,9 +2067,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
           </div>
 
           <div className="relative flex-1 overflow-y-auto p-5">
-            {isGenerating ? (
-              <GenerationSkeleton count={imageCount} workflow={workflow} />
-            ) : result?.images.length ? (
+            {result?.images.length ? (
               <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
                 <section className="flex min-w-0 flex-col gap-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2124,6 +2176,11 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
                         </article>
                       )
                     })}
+                    {isGenerating &&
+                      Array.from(
+                        { length: Math.max(result.requestedCount - result.images.length, 0) },
+                        (_, index) => <PendingImageCard key={`pending-${index}`} />
+                      )}
                   </div>
                 </section>
 
@@ -2141,6 +2198,8 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
                   onUseRevisedPrompt={(value) => updatePrompt(value)}
                 />
               </div>
+            ) : isGenerating ? (
+              <GenerationSkeleton count={imageCount} workflow={workflow} />
             ) : (
               <EmptyCanvas
                 imageCount={imageCount}
@@ -2285,6 +2344,21 @@ function GenerationSkeleton({
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+function PendingImageCard() {
+  return (
+    <Card className="overflow-hidden rounded-xl bg-card py-0 shadow-[0_24px_70px_-50px_rgba(0,0,0,0.9)]">
+      <Skeleton className="aspect-square rounded-none" />
+      <CardContent className="flex flex-col gap-3 p-4">
+        <Skeleton className="h-3 w-28 rounded-sm" />
+        <div className="grid grid-cols-2 gap-2">
+          <Skeleton className="h-7 rounded-md" />
+          <Skeleton className="h-7 rounded-md" />
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
