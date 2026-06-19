@@ -9,6 +9,7 @@ import {
   CopyPlusIcon,
   EyeIcon,
   EyeOffIcon,
+  HistoryIcon,
   ImagePlusIcon,
   KeyRoundIcon,
   LanguagesIcon,
@@ -65,7 +66,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { GenerationHistory } from "@/components/generation-history"
+import { addRecord } from "@/lib/history-db"
 import { type GeneratedImage } from "@/lib/image-request"
+import { type ActiveSource, type StudioResponse, type StoredConnectionPreferences, type UploadPreview } from "@/lib/types"
 import {
   DEFAULT_CUSTOM_SIZE,
   DEFAULT_SIZE,
@@ -89,7 +93,7 @@ import {
   type Locale,
   type StudioMessages,
 } from "@/lib/i18n"
-import { cn } from "@/lib/utils"
+import { cn, downloadImage } from "@/lib/utils"
 
 const MAX_UPLOADS = 4
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1"
@@ -699,39 +703,6 @@ function getGenerationErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
-type StudioResponse = {
-  endpoint: string
-  generation: number
-  images: GeneratedImage[]
-  model: string
-  outputFormat: string
-  prompt: string
-  quality: string
-  requestedCount: number
-  size: string
-  sourceLabel?: string
-}
-
-type UploadPreview = {
-  file: File
-  id: string
-  url: string
-}
-
-type ActiveSource = {
-  label: string
-  promptSnapshot: string
-  round: number
-  upload: UploadPreview
-}
-
-type StoredConnectionPreferences = {
-  version: 1
-  remember: boolean
-  apiKey: string
-  endpoint: string
-}
-
 function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
@@ -1067,6 +1038,7 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
   const [result, setResult] = useState<StudioResponse | null>(null)
   const [selectedImageIndex, setSelectedImageIndex] = useState(0)
   const [activeSource, setActiveSource] = useState<ActiveSource | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const locale = localeOverride ?? browserLocale
   const text = studioMessages[locale]
   const workflow = getWorkflowCopy(locale)
@@ -1484,10 +1456,22 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
       }
 
       const visibleImages = images.slice(0, total)
+      const finalResult = createResult(visibleImages)
 
-      setResult(createResult(visibleImages))
+      setResult(finalResult)
       setSelectedImageIndex((current) => current < visibleImages.length ? current : 0)
       setProgress(100)
+
+      // 自动保存到生成历史（fire-and-forget）
+      addRecord(finalResult)
+        .then((saved) => {
+          if (!saved) {
+            toast.error(text.historySaveFailed)
+          }
+        })
+        .catch(() => {
+          // 静默忽略，不影响用户体验
+        })
 
       if (visibleImages.length < total && firstError) {
         toast.warning(
@@ -1549,6 +1533,15 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
               <span className="text-border">·</span>
               <span className="font-medium text-foreground">×{imageCount}</span>
             </div>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              aria-label={text.historyOpenTrigger}
+              className="h-10 w-10 rounded-md bg-muted/40 shadow-sm"
+              onClick={() => setHistoryOpen(true)}
+            >
+              <HistoryIcon className="size-4" />
+            </Button>
             <Select
               items={LOCALE_OPTIONS}
               value={locale}
@@ -2128,17 +2121,23 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
                                 <ImagePlusIcon data-icon="inline-start" />
                                 {workflow.setAsSource}
                               </Button>
-                              <a
-                                className={cn(
-                                  buttonVariants({ size: "sm", variant: "outline" }),
-                                  "h-9 rounded-md bg-muted/40 px-3 text-xs font-semibold"
-                                )}
-                                download={`imgx-${index + 1}.${result.outputFormat}`}
-                                href={image.src}
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-9 rounded-md bg-muted/40 px-3 text-xs font-semibold"
+                                onClick={() => {
+                                  downloadImage(
+                                    image.src,
+                                    `imgx-${index + 1}.${result.outputFormat}`
+                                  ).catch(() =>
+                                    toast.error(text.downloadFailed ?? "Download failed")
+                                  )
+                                }}
                               >
                                 <ArrowDownToLineIcon data-icon="inline-start" />
                                 {text.save}
-                              </a>
+                              </Button>
                             </div>
                           </div>
                         </article>
@@ -2220,6 +2219,17 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
           )}
         </main>
       </div>
+
+      <GenerationHistory
+        locale={locale}
+        open={historyOpen}
+        text={text}
+        onOpenChange={setHistoryOpen}
+        onRestorePrompt={(prompt) => {
+          updatePrompt(prompt)
+          setHistoryOpen(false)
+        }}
+      />
     </div>
   )
 }
