@@ -10,7 +10,10 @@ export type GeneratedImage = {
 }
 
 export function normalizeOpenAIBaseURL(value: string, locale: Locale = DEFAULT_LOCALE) {
-  const rawEndpoint = (value || DEFAULT_OPENAI_BASE_URL).trim().replace(/\/+$/, "")
+  const trimmed = (value || DEFAULT_OPENAI_BASE_URL).trim().replace(/\/+$/, "")
+
+  // 对无协议前缀的地址（如 localhost:8080、192.168.1.1:7860）自动补 http://
+  const rawEndpoint = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
 
   try {
     const url = new URL(rawEndpoint)

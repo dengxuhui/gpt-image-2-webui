@@ -67,6 +67,13 @@ import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { type GeneratedImage } from "@/lib/image-request"
 import {
+  DEFAULT_CUSTOM_SIZE,
+  DEFAULT_SIZE,
+  MAX_FILE_BYTES,
+  SUPPORTED_IMAGE_TYPES,
+  normalizeCustomSize,
+} from "@/lib/constants"
+import {
   DEFAULT_LOCALE,
   LOCALE_COOKIE_KEY,
   LOCALE_OPTIONS,
@@ -85,8 +92,6 @@ import {
 import { cn } from "@/lib/utils"
 
 const MAX_UPLOADS = 4
-const MAX_FILE_SIZE = 10 * 1024 * 1024
-const ACCEPTED_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"])
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1"
 const GITHUB_REPOSITORY_URL = "https://github.com/imgx-studio/gpt-image-2-webui"
 const CONNECTION_PREFERENCES_KEY = "imgx.connectionPreferences"
@@ -96,10 +101,6 @@ const LEGACY_ENDPOINT_KEY = "imgx.endpoint"
 const optionGroupClassName = "studio-option-group"
 const optionItemClassName = "studio-option-item h-8 text-xs hover:bg-muted"
 const CUSTOM_SIZE_OPTION_VALUE = "custom"
-const DEFAULT_SIZE = "1024x1024"
-const DEFAULT_CUSTOM_SIZE = "1280x720"
-const MIN_CUSTOM_DIMENSION = 64
-const MAX_CUSTOM_DIMENSION = 8192
 const PRESET_SIZE_VALUES = [
   "auto",
   "1024x1024",
@@ -753,29 +754,6 @@ function getNextSizeMode(value: string | null): SizeSelectValue {
   return DEFAULT_SIZE
 }
 
-function normalizeCustomSize(value: string) {
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, "").replace(/×/g, "x")
-  const match = /^([1-9]\d{1,4})x([1-9]\d{1,4})$/.exec(normalized)
-
-  if (!match) {
-    return ""
-  }
-
-  const width = Number(match[1])
-  const height = Number(match[2])
-
-  if (
-    width < MIN_CUSTOM_DIMENSION ||
-    width > MAX_CUSTOM_DIMENSION ||
-    height < MIN_CUSTOM_DIMENSION ||
-    height > MAX_CUSTOM_DIMENSION
-  ) {
-    return ""
-  }
-
-  return `${width}x${height}`
-}
-
 function getWorkflowCopy(locale: Locale) {
   return workflowCopies[locale]
 }
@@ -827,19 +805,12 @@ function buildRequestPrompt(prompt: string, activeSource: ActiveSource | null) {
   return sections.join("\n\n")
 }
 
-function getUploadType(outputFormat: string, blobType: string) {
-  if (ACCEPTED_TYPES.has(blobType)) {
+function getUploadType(blobType: string) {
+  if (SUPPORTED_IMAGE_TYPES.has(blobType)) {
     return blobType
   }
 
-  if (outputFormat === "jpeg") {
-    return "image/jpeg"
-  }
-
-  if (outputFormat === "webp") {
-    return "image/webp"
-  }
-
+  // blob.type 不可靠（如 application/octet-stream）时，默认 PNG
   return "image/png"
 }
 
@@ -859,12 +830,10 @@ async function createGeneratedUploadPreview({
   image,
   index,
   locale,
-  outputFormat,
 }: {
   image: GeneratedImage
   index: number
   locale: Locale
-  outputFormat: string
 }): Promise<UploadPreview> {
   const response = await fetch(image.src)
 
@@ -873,9 +842,9 @@ async function createGeneratedUploadPreview({
   }
 
   const blob = await response.blob()
-  const type = getUploadType(outputFormat, blob.type)
+  const type = getUploadType(blob.type)
 
-  if (blob.size > MAX_FILE_SIZE) {
+  if (blob.size > MAX_FILE_BYTES) {
     throw new Error(t(locale, "exceedsMaxFileSize", { name: `imgx-${index + 1}` }))
   }
 
@@ -1206,12 +1175,12 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
     const accepted: UploadPreview[] = []
 
     for (const file of Array.from(files)) {
-      if (!ACCEPTED_TYPES.has(file.type)) {
+      if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
         toast.error(t(locale, "unsupportedImageFormat", { name: file.name }))
         continue
       }
 
-      if (file.size > MAX_FILE_SIZE) {
+      if (file.size > MAX_FILE_BYTES) {
         toast.error(t(locale, "exceedsMaxFileSize", { name: file.name }))
         continue
       }
@@ -1329,7 +1298,6 @@ export function ImageStudio({ initialLocale = DEFAULT_LOCALE }: { initialLocale?
         image,
         index,
         locale,
-        outputFormat: result?.outputFormat || outputFormat,
       })
       const nextSource: ActiveSource = {
         label: `${workflow.sourceReady} · ${String(index + 1).padStart(2, "0")}`,

@@ -1,6 +1,14 @@
 import OpenAI from "openai"
 import { NextResponse } from "next/server"
 
+import {
+  DEFAULT_SIZE,
+  EDIT_SIZE_VALUES,
+  GENERATE_SIZE_VALUES,
+  MAX_FILE_BYTES,
+  normalizeCustomSize,
+  SUPPORTED_IMAGE_TYPES,
+} from "@/lib/constants"
 import { resolveLocale, t } from "@/lib/i18n"
 import {
   extractGeneratedImages,
@@ -12,42 +20,6 @@ import {
 
 export const runtime = "nodejs"
 export const maxDuration = 120
-
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024
-const MIN_CUSTOM_DIMENSION = 64
-const MAX_CUSTOM_DIMENSION = 8192
-const GENERATE_SIZE_VALUES = new Set([
-  "auto",
-  "256x256",
-  "512x512",
-  "1024x1024",
-  "1536x1024",
-  "1024x1536",
-  "1792x1024",
-  "1024x1792",
-  "2048x2048",
-  "2048x1152",
-  "3840x2160",
-  "2160x3840",
-])
-const EDIT_SIZE_VALUES = new Set([
-  "auto",
-  "256x256",
-  "512x512",
-  "1024x1024",
-  "1536x1024",
-  "1024x1536",
-  "2048x2048",
-  "2048x1152",
-  "3840x2160",
-  "2160x3840",
-])
-const SUPPORTED_IMAGE_TYPES = new Set([
-  "image/jpeg",
-  "image/jpg",
-  "image/png",
-  "image/webp",
-])
 
 function getText(formData: FormData, key: string, fallback = "") {
   const value = formData.get(key)
@@ -72,38 +44,15 @@ function getGenerateQuality(formData: FormData) {
     : "auto"
 }
 
-function normalizeCustomSize(value: string) {
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, "").replace(/×/g, "x")
-  const match = /^([1-9]\d{1,4})x([1-9]\d{1,4})$/.exec(normalized)
-
-  if (!match) {
-    return ""
-  }
-
-  const width = Number(match[1])
-  const height = Number(match[2])
-
-  if (
-    width < MIN_CUSTOM_DIMENSION ||
-    width > MAX_CUSTOM_DIMENSION ||
-    height < MIN_CUSTOM_DIMENSION ||
-    height > MAX_CUSTOM_DIMENSION
-  ) {
-    return ""
-  }
-
-  return `${width}x${height}`
-}
-
 function getSize(formData: FormData, supportedSizes: Set<string>) {
-  const value = getText(formData, "size", "1024x1024")
-  const normalizedCustomSize = normalizeCustomSize(value)
+  const value = getText(formData, "size", DEFAULT_SIZE)
+  const custom = normalizeCustomSize(value)
 
   if (supportedSizes.has(value)) {
     return value
   }
 
-  return normalizedCustomSize || "1024x1024"
+  return custom || DEFAULT_SIZE
 }
 
 function getEditQuality(formData: FormData) {
@@ -158,7 +107,7 @@ export async function POST(request: Request) {
         )
       }
 
-      if (image.size > MAX_IMAGE_BYTES) {
+      if (image.size > MAX_FILE_BYTES) {
         return NextResponse.json(
           { error: t(locale, "proxyImageTooLarge", { name: image.name }) },
           { status: 400 }
@@ -180,7 +129,7 @@ export async function POST(request: Request) {
     })
     let payload: unknown
     let requestQuality = "auto"
-    let requestSize = "1024x1024"
+    let requestSize = DEFAULT_SIZE
 
     if (images.length) {
       const quality = getEditQuality(incomingFormData)
@@ -188,9 +137,10 @@ export async function POST(request: Request) {
 
       requestQuality = quality
       requestSize = size
+      // images.edit 仅接受单张图片，多张参考图时只取第一张
       payload = await client.images.edit({
         background,
-        image: images.length === 1 ? images[0] : images,
+        image: images[0],
         model,
         n,
         output_format: outputFormat,
