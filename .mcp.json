@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "imgx": {
+      "command": "node",
+      "args": ["--env-file=.env.local", "mcp-server/dist/index.mjs"]
+    }
+  }
+}

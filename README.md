@@ -131,11 +131,53 @@ Open [http://localhost:3000](http://localhost:3000).
    - **Server proxy**: the app forwards requests through `/api/images` and can use `OPENAI_API_KEY`.
 5. Generate images, select the strongest result, download it, or set it as the source image for the next round.
 
+## Use from Claude Code (MCP)
+
+ImgX ships a built-in MCP server that exposes its image generation as standard tools, so **MCP clients like Claude Code can generate images without opening the web UI or running `npm run dev`**.
+
+The MCP server is bundled into a single JS file (no dependency on tsx / tsconfig / working directory), so it can be registered at **user scope and loaded by Claude from any directory**.
+
+**Setup:**
+
+1. Make sure `OPENAI_API_KEY` is set in `.env.local` (see `.env.example`).
+2. Build the MCP server (re-run after source changes):
+
+   ```bash
+   npm run build:mcp        # output: mcp-server/dist/index.mjs
+   ```
+
+3. Choose how to register it:
+
+   - **This project only**: the repo ships `.mcp.json`; Claude Code auto-detects it when launched inside the project.
+   - **Any directory (recommended)**: register at user scope with absolute paths:
+
+     ```bash
+     claude mcp add imgx -s user \
+       -e IMGX_OUTPUT_DIR=/abs/path/to/repo/generated \
+       -- node --env-file=/abs/path/to/repo/.env.local \
+          /abs/path/to/repo/mcp-server/dist/index.mjs
+     ```
+
+4. Confirm `imgx` is Connected with `claude mcp list`, then ask "generate an image of a sunset beach".
+
+**Provided tools:**
+
+| Tool | Description |
+| --- | --- |
+| `imgx_generate` | Text-to-image generation from a prompt |
+| `imgx_edit` | Image-to-image from a local reference image (absolute path) |
+
+**Shared history:** Images generated via MCP are written to `IMGX_OUTPUT_DIR` (for user-scope registration, point it at the repo's `generated` directory with an absolute path — otherwise images land in the current working directory and the web UI won't see them). When you open the web history panel, they are merged with your local browser history and tagged with a "Claude Code" source badge.
+
+> For source-level debugging use `npm run mcp` (runs the TS source via tsx, no build needed); but Claude loads the bundled output, so re-run `npm run build:mcp` after editing the code.
+
 ## Environment variables
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | No | Used by server proxy mode. A key entered in the UI takes priority; otherwise the server env value is used. |
+| `OPENAI_API_KEY` | No | Used by server proxy mode and the MCP server. A key entered in the UI takes priority; otherwise the server env value is used. |
+| `OPENAI_BASE_URL` | No | Upstream base URL used by the MCP server; defaults to the official endpoint. |
+| `IMGX_OUTPUT_DIR` | No | Directory where MCP-generated images are saved; defaults to `./generated`. |
 | `NEXT_ASSET_PREFIX` | No | Sets the static asset prefix for sub-path or CDN deployments. |
 
 ## Deploy

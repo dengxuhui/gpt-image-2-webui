@@ -29,6 +29,15 @@ export type ActiveSource = {
   upload: UploadPreview
 }
 
+/** 服务端落盘的生成记录（由 MCP server 生成），经 GET /api/history 返回 */
+export type ServerHistoryRecord = {
+  id: string
+  createdAt: number
+  /** 来源标识，用于网页打来源徽章 */
+  source: "mcp"
+  response: StudioResponse
+}
+
 /** localStorage 中持久化的连接偏好 */
 export type StoredConnectionPreferences = {
   version: 1

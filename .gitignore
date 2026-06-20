@@ -32,6 +32,13 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# MCP 生成的图片落盘目录
+/generated
+
+# MCP server 打包产物（用 npm run build:mcp 生成）
+/mcp-server/dist
 
 # vercel
 .vercel

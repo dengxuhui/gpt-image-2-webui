@@ -38,8 +38,11 @@ import {
   getStorageEstimate,
 } from "@/lib/history-db"
 import type { Locale, StudioMessages } from "@/lib/i18n"
-import type { StudioResponse } from "@/lib/types"
+import type { ServerHistoryRecord } from "@/lib/types"
 import { cn, downloadImage } from "@/lib/utils"
+
+/** 列表展示用记录：本地 IndexedDB 记录与服务端（MCP）记录的统一形状 */
+type DisplayRecord = HistoryRecord & { source?: "mcp"; sourceLabel?: string }
 
 // ---- 时间格式化 ----
 
@@ -84,6 +87,7 @@ export function GenerationHistory({
   onRestorePrompt,
 }: GenerationHistoryProps) {
   const [records, setRecords] = useState<HistoryRecord[]>([])
+  const [serverRecords, setServerRecords] = useState<DisplayRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -116,6 +120,24 @@ export function GenerationHistory({
       } catch {
         toast.error(text.historyLoadFailed)
       }
+
+      // 读取服务端（MCP）落盘历史，失败时静默忽略
+      try {
+        const res = await fetch("/api/history")
+        if (res.ok) {
+          const data: { records?: ServerHistoryRecord[] } = await res.json()
+          setServerRecords(
+            (data.records ?? []).map((r) => ({
+              ...r,
+              source: "mcp" as const,
+              sourceLabel: r.response.sourceLabel,
+            }))
+          )
+        }
+      } catch {
+        // 网页独立运行时该接口可能不可用，忽略即可
+      }
+
       setLoading(false)
     }
 
@@ -232,6 +254,11 @@ export function GenerationHistory({
   const allSelected =
     records.length > 0 && selectedIds.size === records.length
 
+  // 合并本地与服务端记录，按时间倒序展示
+  const displayRecords: DisplayRecord[] = [...records, ...serverRecords].sort(
+    (a, b) => b.createdAt - a.createdAt
+  )
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
@@ -315,7 +342,7 @@ export function GenerationHistory({
                 </div>
               ))}
             </div>
-          ) : records.length === 0 ? (
+          ) : displayRecords.length === 0 ? (
             <div className="flex h-full items-center justify-center py-12">
               <Empty>
                 <EmptyHeader>
@@ -354,10 +381,11 @@ export function GenerationHistory({
           ) : (
             /* 历史记录列表 */
             <div className="space-y-2 py-2">
-              {records.map((record) => {
+              {displayRecords.map((record) => {
                 const firstImage = record.response.images[0]
                 const promptPreview =
                   record.response.prompt || text.historyNoPrompt
+                const isServer = record.source === "mcp"
                 const isSelected = selectedIds.has(record.id)
 
                 return (
@@ -370,8 +398,8 @@ export function GenerationHistory({
                         : "hover:bg-muted/50"
                     )}
                   >
-                    {/* 选择框覆盖 */}
-                    {selectionMode && (
+                    {/* 选择框覆盖（服务端记录为只读，不参与选择） */}
+                    {selectionMode && !isServer && (
                       <button
                         type="button"
                         className="absolute inset-0 z-10 cursor-pointer"
@@ -386,7 +414,7 @@ export function GenerationHistory({
                     <div
                       className={cn(
                         "relative z-0 size-20 shrink-0 overflow-hidden rounded-md border bg-muted",
-                        selectionMode && "pointer-events-none"
+                        selectionMode && !isServer && "pointer-events-none"
                       )}
                     >
                       {firstImage ? (
@@ -415,6 +443,11 @@ export function GenerationHistory({
                         {promptPreview}
                       </p>
                       <div className="flex flex-wrap items-center gap-1">
+                        {isServer && (
+                          <Badge className="text-[10px]" variant="default">
+                            {record.sourceLabel || "Claude Code"}
+                          </Badge>
+                        )}
                         <Badge
                           className="text-[10px]"
                           variant="secondary"
@@ -446,7 +479,7 @@ export function GenerationHistory({
                       <div
                         className={cn(
                           "mt-1 flex items-center gap-1",
-                          selectionMode && "pointer-events-none opacity-0"
+                          selectionMode && !isServer && "pointer-events-none opacity-0"
                         )}
                       >
                         {firstImage && (
@@ -491,14 +524,16 @@ export function GenerationHistory({
                             {text.historyRestorePrompt}
                           </Button>
                         )}
-                        <Button
-                          size="xs"
-                          variant="ghost"
-                          className="ml-auto h-6 rounded-md px-1.5 text-[10px] text-muted-foreground hover:text-destructive"
-                          onClick={() => handleDeleteOne(record.id)}
-                        >
-                          <Trash2Icon data-icon="inline-start" />
-                        </Button>
+                        {!isServer && (
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            className="ml-auto h-6 rounded-md px-1.5 text-[10px] text-muted-foreground hover:text-destructive"
+                            onClick={() => handleDeleteOne(record.id)}
+                          >
+                            <Trash2Icon data-icon="inline-start" />
+                          </Button>
+                        )}
                       </div>
                     </div>
                   </div>

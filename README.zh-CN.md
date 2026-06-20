@@ -116,11 +116,53 @@ npm run dev
    - **Server proxy**：通过 `/api/images` 转发，可使用服务端 `OPENAI_API_KEY`。
 5. 生成后选择最满意的一张，可下载，也可设为源图继续二创。
 
+## 在 Claude Code 中使用（MCP）
+
+ImgX 内置一个 MCP server，把生图能力暴露为标准工具，让 **Claude Code 等 MCP 客户端无需打开网页、也无需 `npm run dev`** 即可直接生图。
+
+MCP server 会被打包成单文件 JS（不依赖 tsx / tsconfig / 工作目录），因此**可以注册到 user 级，让任意目录启动的 Claude 都能加载使用**。
+
+**首次配置：**
+
+1. 确保 `.env.local` 中已配置 `OPENAI_API_KEY`（参见 `.env.example`）。
+2. 打包 MCP server（源码改动后需重新执行）：
+
+   ```bash
+   npm run build:mcp        # 产物：mcp-server/dist/index.mjs
+   ```
+
+3. 选择接入范围：
+
+   - **仅本项目**：项目根已自带 `.mcp.json`，在本项目里启动 Claude Code 会自动检测并提示信任。
+   - **任意目录（推荐）**：注册到 user 级，全局可用（注意用绝对路径）：
+
+     ```bash
+     claude mcp add imgx -s user \
+       -e IMGX_OUTPUT_DIR=/abs/path/to/repo/generated \
+       -- node --env-file=/abs/path/to/repo/.env.local \
+          /abs/path/to/repo/mcp-server/dist/index.mjs
+     ```
+
+4. 用 `claude mcp list` 确认 `imgx` 为 Connected，然后在对话里说"生成一张夕阳海滩的图片"即可。
+
+**提供的工具：**
+
+| 工具 | 说明 |
+| --- | --- |
+| `imgx_generate` | 文生图：根据提示词生成图片 |
+| `imgx_edit` | 图生图：基于本地参考图（绝对路径）生成图片 |
+
+**与网页历史打通：** MCP 生成的图片会落盘到 `IMGX_OUTPUT_DIR`（user 级注册时务必指向仓库内的 `generated` 绝对路径，否则会落到当前工作目录而网页读不到）。打开网页历史面板时，这些图片会与浏览器本地历史合并展示，并带 "Claude Code" 来源徽章。
+
+> 源码调试可用 `npm run mcp`（tsx 直跑源码，免打包）；但 Claude 实际加载的是打包产物，改完代码记得重新 `npm run build:mcp`。
+
 ## 环境变量
 
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | 否 | 服务端代理模式使用。页面填写的 Key 优先；未填写时会使用该环境变量。 |
+| `OPENAI_API_KEY` | 否 | 服务端代理模式与 MCP server 使用。页面填写的 Key 优先；未填写时会使用该环境变量。 |
+| `OPENAI_BASE_URL` | 否 | MCP server 使用的上游 base URL，留空则用官方地址。 |
+| `IMGX_OUTPUT_DIR` | 否 | MCP 生成图片的落盘目录，默认项目根的 `./generated`。 |
 | `NEXT_ASSET_PREFIX` | 否 | 为静态资源设置 asset prefix，适合部署到带子路径/CDN 的环境。 |
 
 ## 部署

@@ -9,11 +9,10 @@ import {
   normalizeCustomSize,
   SUPPORTED_IMAGE_TYPES,
 } from "@/lib/constants"
+import { generateImages } from "@/lib/generate-image"
 import { resolveLocale, t } from "@/lib/i18n"
 import {
-  extractGeneratedImages,
   getImageApiError,
-  getPayloadField,
   normalizeImageEndpoint,
   normalizeOpenAIBaseURL,
 } from "@/lib/image-request"
@@ -122,52 +121,24 @@ export async function POST(request: Request) {
     const imageCount = Number(getText(incomingFormData, "imageCount", "1"))
     const background = getBackground(incomingFormData)
     const n = Math.min(Math.max(imageCount, 1), 4)
-    const client = new OpenAI({
+    const quality = images.length ? getEditQuality(incomingFormData) : getGenerateQuality(incomingFormData)
+    const size = images.length ? getEditSize(incomingFormData) : getGenerateSize(incomingFormData)
+
+    const result = await generateImages({
       apiKey,
+      background,
       baseURL,
-      maxRetries: 0,
+      endpoint,
+      imageFiles: images,
+      model,
+      n,
+      outputFormat,
+      prompt,
+      quality,
+      size,
     })
-    let payload: unknown
-    let requestQuality = "auto"
-    let requestSize = DEFAULT_SIZE
 
-    if (images.length) {
-      const quality = getEditQuality(incomingFormData)
-      const size = getEditSize(incomingFormData)
-
-      requestQuality = quality
-      requestSize = size
-      // images.edit 仅接受单张图片，多张参考图时只取第一张
-      payload = await client.images.edit({
-        background,
-        image: images[0],
-        model,
-        n,
-        output_format: outputFormat,
-        prompt,
-        quality,
-        size: size as OpenAI.Images.ImageEditParams["size"],
-      })
-    } else {
-      const quality = getGenerateQuality(incomingFormData)
-      const size = getGenerateSize(incomingFormData)
-
-      requestQuality = quality
-      requestSize = size
-      payload = await client.images.generate({
-        background,
-        model,
-        n,
-        output_format: outputFormat,
-        prompt,
-        quality,
-        size: size as OpenAI.Images.ImageGenerateParams["size"],
-      })
-    }
-
-    const generatedImages = extractGeneratedImages(payload, outputFormat)
-
-    if (!generatedImages.length) {
+    if (!result.images.length) {
       return NextResponse.json(
         {
           endpoint,
@@ -178,15 +149,15 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      background: getPayloadField(payload, "background"),
-      created: getPayloadField(payload, "created"),
+      background: result.background,
+      created: result.created,
       endpoint,
-      images: generatedImages,
+      images: result.images,
       model,
       outputFormat,
-      quality: getPayloadField(payload, "quality") || requestQuality,
-      size: getPayloadField(payload, "size") || requestSize,
-      usage: getPayloadField(payload, "usage"),
+      quality: result.quality,
+      size: result.size,
+      usage: result.usage,
     })
   } catch (error) {
     if (error instanceof OpenAI.APIError) {
