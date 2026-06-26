@@ -99,6 +99,8 @@ export function GenerationHistory({
     src: string
     alt: string
   } | null>(null)
+  // 加载失败（资源丢失）的图片 src，用占位图代替破图
+  const [failedImages, setFailedImages] = useState<Set<string>>(new Set())
 
   // Sheet 打开时加载数据
   useEffect(() => {
@@ -188,6 +190,33 @@ export function GenerationHistory({
       text.historyRecordsDeleted.replace("{count}", String(ids.length))
     )
   }, [selectedIds, text.historyRecordsDeleted, refreshStorageInfo])
+
+  const handleDeleteServer = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/history?id=${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        })
+        if (!res.ok) {
+          throw new Error(`Delete failed: ${res.status}`)
+        }
+        setServerRecords((prev) => prev.filter((r) => r.id !== id))
+        toast.success(text.historyRecordDeleted)
+      } catch {
+        toast.error(text.historyRecordDeleteFailed)
+      }
+    },
+    [text.historyRecordDeleted, text.historyRecordDeleteFailed]
+  )
+
+  const handleImageError = useCallback((src: string) => {
+    setFailedImages((prev) => {
+      if (prev.has(src)) return prev
+      const next = new Set(prev)
+      next.add(src)
+      return next
+    })
+  }, [])
 
   const handleClearAll = useCallback(async () => {
     await clearAllRecords()
@@ -387,6 +416,10 @@ export function GenerationHistory({
                   record.response.prompt || text.historyNoPrompt
                 const isServer = record.source === "mcp"
                 const isSelected = selectedIds.has(record.id)
+                // 图片资源已丢失（如服务端文件被删）：用占位图代替破图
+                const imageLost = firstImage
+                  ? failedImages.has(firstImage.src)
+                  : false
 
                 return (
                   <div
@@ -417,13 +450,14 @@ export function GenerationHistory({
                         selectionMode && !isServer && "pointer-events-none"
                       )}
                     >
-                      {firstImage ? (
+                      {firstImage && !imageLost ? (
                         /* eslint-disable-next-line @next/next/no-img-element */
                         <img
                           alt={promptPreview.slice(0, 40)}
                           className="size-full object-cover"
                           loading="lazy"
                           src={firstImage.src}
+                          onError={() => handleImageError(firstImage.src)}
                         />
                       ) : (
                         <div className="flex size-full items-center justify-center">
@@ -482,7 +516,7 @@ export function GenerationHistory({
                           selectionMode && !isServer && "pointer-events-none opacity-0"
                         )}
                       >
-                        {firstImage && (
+                        {firstImage && !imageLost && (
                           <>
                             <Button
                               size="xs"
@@ -524,16 +558,18 @@ export function GenerationHistory({
                             {text.historyRestorePrompt}
                           </Button>
                         )}
-                        {!isServer && (
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            className="ml-auto h-6 rounded-md px-1.5 text-[10px] text-muted-foreground hover:text-destructive"
-                            onClick={() => handleDeleteOne(record.id)}
-                          >
-                            <Trash2Icon data-icon="inline-start" />
-                          </Button>
-                        )}
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          className="ml-auto h-6 rounded-md px-1.5 text-[10px] text-muted-foreground hover:text-destructive"
+                          onClick={() =>
+                            isServer
+                              ? handleDeleteServer(record.id)
+                              : handleDeleteOne(record.id)
+                          }
+                        >
+                          <Trash2Icon data-icon="inline-start" />
+                        </Button>
                       </div>
                     </div>
                   </div>

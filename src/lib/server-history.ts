@@ -129,6 +129,47 @@ export async function listServerRecords(): Promise<ServerHistoryRecord[]> {
   return records.sort((a, b) => b.createdAt - a.createdAt)
 }
 
+/**
+ * 删除一条服务端记录：移除元数据 JSON 及其所有同前缀的落盘图片文件。
+ * 图片文件可能已丢失，逐个删除时容忍 ENOENT。
+ * 返回 true 表示确实删除了元数据文件（记录存在）。
+ */
+export async function deleteServerRecord(id: string): Promise<boolean> {
+  // 仅允许纯 id，防止路径穿越
+  const safeId = path.basename(id)
+  if (safeId !== id || safeId.includes("..") || safeId.length === 0) {
+    return false
+  }
+
+  const dir = getOutputDir()
+  let entries: string[]
+  try {
+    entries = await fs.readdir(dir)
+  } catch {
+    return false
+  }
+
+  const metaName = `${safeId}${META_SUFFIX}`
+  // 元数据文件本身，以及所有 `<id>-*` 形式的图片文件
+  const targets = entries.filter(
+    (entry) => entry === metaName || entry.startsWith(`${safeId}-`)
+  )
+
+  let metaDeleted = false
+  for (const entry of targets) {
+    try {
+      await fs.unlink(path.join(dir, entry))
+      if (entry === metaName) {
+        metaDeleted = true
+      }
+    } catch {
+      // 文件可能已丢失，忽略
+    }
+  }
+
+  return metaDeleted
+}
+
 const CONTENT_TYPES: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
