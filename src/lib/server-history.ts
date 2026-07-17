@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs"
 import path from "node:path"
 
+import { HISTORY_FILE_PREFIX } from "@/lib/constants"
 import type { GeneratedImage } from "@/lib/image-request"
 import type { ServerHistoryRecord } from "@/lib/types"
 
@@ -30,20 +31,115 @@ export function getOutputDir(): string {
     : path.join(process.cwd(), "generated")
 }
 
+/** 落盘图片支持的扩展名 → Content-Type */
+const CONTENT_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+}
+
+/** 远程图片下载超时 */
+const FETCH_TIMEOUT_MS = 30_000
+
+/** 归一化扩展名；不受支持时回退 png，保证落盘文件可被 readImageFile 提供 */
+function normalizeExt(value: string): string {
+  const ext = value.toLowerCase().replace(/^\./, "")
+  const normalized = ext === "jpeg" ? "jpg" : ext
+  return CONTENT_TYPES[normalized] ? normalized : "png"
+}
+
 /** 解析 data URL，返回二进制与扩展名；非 base64（如远程 http URL）返回 null */
 function decodeDataUrl(src: string): { buffer: Buffer; ext: string } | null {
   const match = /^data:image\/([a-zA-Z0-9.+-]+);base64,([\s\S]+)$/.exec(src)
   if (!match) {
     return null
   }
-  const ext = match[1].toLowerCase() === "jpeg" ? "jpg" : match[1].toLowerCase()
-  return { buffer: Buffer.from(match[2], "base64"), ext }
+  return { buffer: Buffer.from(match[2], "base64"), ext: normalizeExt(match[1]) }
 }
 
 /**
- * 保存一条生成记录：每张图解码落盘为文件，元数据写为单个 JSON。
- * 图片的 src 改写为 /api/history/file/<filename>，供网页直接当图片地址渲染；
- * 若 src 是远程 URL（无法解码），则原样保留。
+ * 下载远程图片（上游返回 url 而非 b64_json 时走这里）。
+ * 这类链接会过期，不落盘则历史记录迟早裂图。失败返回 null，由调用方保留原 src。
+ */
+async function downloadRemoteImage(
+  src: string,
+  outputFormat: string
+): Promise<{ buffer: Buffer; ext: string } | null> {
+  if (!/^https?:\/\//.test(src)) {
+    return null
+  }
+
+  try {
+    const res = await fetch(src, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    if (!res.ok) {
+      return null
+    }
+
+    const buffer = Buffer.from(await res.arrayBuffer())
+    if (buffer.length === 0) {
+      return null
+    }
+
+    // 明确不是图片（如上游返回 HTML 错误页）就别落盘，否则只是把裂图换个地方存
+    const contentType = res.headers.get("content-type")?.split(";")[0].trim()
+    if (contentType && !contentType.startsWith("image/")) {
+      return null
+    }
+
+    // 优先信任响应头，缺失时回退到请求时指定的输出格式
+    const subtype = contentType
+      ? contentType.slice("image/".length)
+      : outputFormat
+
+    return { buffer, ext: normalizeExt(subtype) }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把生成结果里的图片全部落盘到输出目录，src 改写为 /api/history/file/<filename>。
+ * data URL 直接解码，远程 URL 先下载；单张失败时原样保留其 src，不影响其余图片。
+ * baseId 用于文件名前缀，deleteServerRecord 据此清理同一条记录的所有图片。
+ */
+export async function persistImages(
+  images: GeneratedImage[],
+  outputFormat: string,
+  baseId: string = crypto.randomUUID()
+): Promise<GeneratedImage[]> {
+  if (images.length === 0) {
+    return images
+  }
+
+  const dir = getOutputDir()
+  await fs.mkdir(dir, { recursive: true })
+
+  const persisted: GeneratedImage[] = []
+  for (let i = 0; i < images.length; i++) {
+    const image = images[i]
+    const decoded =
+      decodeDataUrl(image.src) ?? (await downloadRemoteImage(image.src, outputFormat))
+
+    if (!decoded) {
+      persisted.push(image)
+      continue
+    }
+
+    const filename = `${baseId}-${i}.${decoded.ext}`
+    try {
+      await fs.writeFile(path.join(dir, filename), decoded.buffer)
+      persisted.push({ ...image, src: `${HISTORY_FILE_PREFIX}${filename}` })
+    } catch {
+      persisted.push(image)
+    }
+  }
+
+  return persisted
+}
+
+/**
+ * 保存一条生成记录：每张图落盘为文件（见 persistImages），元数据写为单个 JSON。
  */
 export async function saveServerRecord(
   input: SaveServerRecordInput
@@ -54,24 +150,7 @@ export async function saveServerRecord(
   const id = crypto.randomUUID()
   const createdAt = Date.now()
 
-  const images: GeneratedImage[] = []
-  for (let i = 0; i < input.images.length; i++) {
-    const image = input.images[i]
-    const decoded = decodeDataUrl(image.src)
-
-    if (!decoded) {
-      // 远程 URL 等无法落盘的情况，原样保留
-      images.push(image)
-      continue
-    }
-
-    const filename = `${id}-${i}.${decoded.ext}`
-    await fs.writeFile(path.join(dir, filename), decoded.buffer)
-    images.push({
-      ...image,
-      src: `/api/history/file/${filename}`,
-    })
-  }
+  const images = await persistImages(input.images, input.outputFormat, id)
 
   const record: ServerHistoryRecord = {
     id,
@@ -170,33 +249,90 @@ export async function deleteServerRecord(id: string): Promise<boolean> {
   return metaDeleted
 }
 
-const CONTENT_TYPES: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  webp: "image/webp",
+/**
+ * 校验文件名并解析为输出目录内的绝对路径。
+ * 仅允许纯文件名（防路径穿越）且扩展名在图片白名单内——后者同时保证
+ * 删除接口碰不到元数据 JSON。非法返回 null。
+ */
+function resolveImagePath(
+  name: string
+): { path: string; contentType: string } | null {
+  const safe = path.basename(name)
+  if (safe !== name || safe.includes("..")) {
+    return null
+  }
+
+  const contentType = CONTENT_TYPES[path.extname(safe).slice(1).toLowerCase()]
+  if (!contentType) {
+    return null
+  }
+
+  return { path: path.join(getOutputDir(), safe), contentType }
 }
 
 /** 读取落盘的图片文件（含路径穿越防护）。不存在或非法返回 null。 */
 export async function readImageFile(
   name: string
 ): Promise<{ data: Buffer; contentType: string } | null> {
-  // 仅允许纯文件名，防止路径穿越
-  const safe = path.basename(name)
-  if (safe !== name || safe.includes("..")) {
-    return null
-  }
-
-  const ext = path.extname(safe).slice(1).toLowerCase()
-  const contentType = CONTENT_TYPES[ext]
-  if (!contentType) {
+  const resolved = resolveImagePath(name)
+  if (!resolved) {
     return null
   }
 
   try {
-    const data = await fs.readFile(path.join(getOutputDir(), safe))
-    return { data, contentType }
+    const data = await fs.readFile(resolved.path)
+    return { data, contentType: resolved.contentType }
   } catch {
     return null
   }
+}
+
+/**
+ * 删除指定的落盘图片文件，返回实际删除的数量。
+ * 供网页删除浏览器历史记录时同步清理磁盘，避免留下孤儿文件。
+ * 文件可能已丢失，逐个删除时容忍 ENOENT。
+ */
+export async function deleteImageFiles(names: string[]): Promise<number> {
+  let deleted = 0
+
+  for (const name of names) {
+    const resolved = resolveImagePath(name)
+    if (!resolved) {
+      continue
+    }
+
+    try {
+      await fs.unlink(resolved.path)
+      deleted++
+    } catch {
+      // 文件已丢失，忽略
+    }
+  }
+
+  return deleted
+}
+
+/** 统计输出目录的磁盘占用（字节）。目录不存在时返回 0。 */
+export async function getDiskUsage(): Promise<number> {
+  const dir = getOutputDir()
+  let entries: string[]
+  try {
+    entries = await fs.readdir(dir)
+  } catch {
+    return 0
+  }
+
+  let total = 0
+  for (const entry of entries) {
+    try {
+      const stat = await fs.stat(path.join(dir, entry))
+      if (stat.isFile()) {
+        total += stat.size
+      }
+    } catch {
+      // 文件可能在统计期间被删除，忽略
+    }
+  }
+
+  return total
 }

@@ -1,6 +1,21 @@
 /** 单张图片最大字节数 */
 export const MAX_FILE_BYTES = 10 * 1024 * 1024
 
+/** 落盘图片的访问路径前缀：服务端据此改写 src，客户端据此反解文件名 */
+export const HISTORY_FILE_PREFIX = "/api/history/file/"
+
+/**
+ * 从生成结果的 src 中取出落盘文件名；非落盘图片（如上游远程 URL）返回 null。
+ */
+export function getHistoryFileName(src: string): string | null {
+  if (!src.startsWith(HISTORY_FILE_PREFIX)) {
+    return null
+  }
+
+  const name = decodeURIComponent(src.slice(HISTORY_FILE_PREFIX.length))
+  return name.length > 0 && !name.includes("/") ? name : null
+}
+
 /** 自定义尺寸单边最小值 */
 export const MIN_CUSTOM_DIMENSION = 64
 

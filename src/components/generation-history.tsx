@@ -32,10 +32,10 @@ import {
   type HistoryRecord,
   addRecord,
   clearAllRecords,
+  collectFileNames,
   deleteRecord,
   deleteRecords,
   getAllRecords,
-  getStorageEstimate,
 } from "@/lib/history-db"
 import type { Locale, StudioMessages } from "@/lib/i18n"
 import type { ServerHistoryRecord } from "@/lib/types"
@@ -91,16 +91,35 @@ export function GenerationHistory({
   const [loading, setLoading] = useState(true)
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [storageInfo, setStorageInfo] = useState<{
-    recordCount: number
-    estimatedBytes: number
-  } | null>(null)
+  /** 输出目录的磁盘占用；接口不可用时为 null（不展示用量） */
+  const [diskBytes, setDiskBytes] = useState<number | null>(null)
   const [previewImage, setPreviewImage] = useState<{
     src: string
     alt: string
   } | null>(null)
   // 加载失败（资源丢失）的图片 src，用占位图代替破图
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set())
+
+  /** 拉取服务端（MCP）落盘历史与磁盘用量；网页独立运行时接口可能不可用，静默忽略 */
+  const loadServerHistory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/history")
+      if (!res.ok) return
+
+      const data: { records?: ServerHistoryRecord[]; diskBytes?: number } =
+        await res.json()
+      setServerRecords(
+        (data.records ?? []).map((r) => ({
+          ...r,
+          source: "mcp" as const,
+          sourceLabel: r.response.sourceLabel,
+        }))
+      )
+      setDiskBytes(typeof data.diskBytes === "number" ? data.diskBytes : null)
+    } catch {
+      // 接口不可用，保持不展示用量
+    }
+  }, [])
 
   // Sheet 打开时加载数据
   useEffect(() => {
@@ -109,42 +128,17 @@ export function GenerationHistory({
     async function load() {
       setLoading(true)
       try {
-        const [all, info] = await Promise.all([
-          getAllRecords(),
-          getStorageEstimate(),
-        ])
-        setRecords(all)
-        if (info.recordCount > 0) {
-          setStorageInfo(info)
-        } else {
-          setStorageInfo(null)
-        }
+        setRecords(await getAllRecords())
       } catch {
         toast.error(text.historyLoadFailed)
       }
 
-      // 读取服务端（MCP）落盘历史，失败时静默忽略
-      try {
-        const res = await fetch("/api/history")
-        if (res.ok) {
-          const data: { records?: ServerHistoryRecord[] } = await res.json()
-          setServerRecords(
-            (data.records ?? []).map((r) => ({
-              ...r,
-              source: "mcp" as const,
-              sourceLabel: r.response.sourceLabel,
-            }))
-          )
-        }
-      } catch {
-        // 网页独立运行时该接口可能不可用，忽略即可
-      }
-
+      await loadServerHistory()
       setLoading(false)
     }
 
     load()
-  }, [open, text.historyLoadFailed])
+  }, [open, text.historyLoadFailed, loadServerHistory])
 
   // Sheet 关闭时重置状态
   useEffect(() => {
@@ -157,13 +151,28 @@ export function GenerationHistory({
 
   // ---- 操作函数 ----
 
-  const refreshStorageInfo = useCallback(async () => {
-    const info = await getStorageEstimate()
-    setStorageInfo(info.recordCount > 0 ? info : null)
+  /**
+   * 删除记录对应的落盘图片，避免磁盘上留下孤儿文件。
+   * 清理失败不影响本地记录删除（下次仍可重试或手动清理），故静默忽略。
+   */
+  const deleteFilesOnDisk = useCallback(async (targets: HistoryRecord[]) => {
+    const names = collectFileNames(targets)
+    if (names.length === 0) return
+
+    try {
+      await fetch("/api/history/file", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names }),
+      })
+    } catch {
+      // 磁盘清理失败，忽略
+    }
   }, [])
 
   const handleDeleteOne = useCallback(
     async (id: string) => {
+      const target = records.find((r) => r.id === id)
       await deleteRecord(id)
       setRecords((prev) => prev.filter((r) => r.id !== id))
       setSelectedIds((prev) => {
@@ -171,25 +180,36 @@ export function GenerationHistory({
         next.delete(id)
         return next
       })
-      await refreshStorageInfo()
+      if (target) {
+        await deleteFilesOnDisk([target])
+      }
+      await loadServerHistory()
       toast.success(text.historyRecordDeleted)
     },
-    [text.historyRecordDeleted, refreshStorageInfo]
+    [records, text.historyRecordDeleted, deleteFilesOnDisk, loadServerHistory]
   )
 
   const handleDeleteSelected = useCallback(async () => {
     if (selectedIds.size === 0) return
 
     const ids = [...selectedIds]
+    const targets = records.filter((r) => selectedIds.has(r.id))
     await deleteRecords(ids)
     setRecords((prev) => prev.filter((r) => !selectedIds.has(r.id)))
     setSelectedIds(new Set())
     setSelectionMode(false)
-    await refreshStorageInfo()
+    await deleteFilesOnDisk(targets)
+    await loadServerHistory()
     toast.success(
       text.historyRecordsDeleted.replace("{count}", String(ids.length))
     )
-  }, [selectedIds, text.historyRecordsDeleted, refreshStorageInfo])
+  }, [
+    records,
+    selectedIds,
+    text.historyRecordsDeleted,
+    deleteFilesOnDisk,
+    loadServerHistory,
+  ])
 
   const handleDeleteServer = useCallback(
     async (id: string) => {
@@ -201,12 +221,13 @@ export function GenerationHistory({
           throw new Error(`Delete failed: ${res.status}`)
         }
         setServerRecords((prev) => prev.filter((r) => r.id !== id))
+        await loadServerHistory()
         toast.success(text.historyRecordDeleted)
       } catch {
         toast.error(text.historyRecordDeleteFailed)
       }
     },
-    [text.historyRecordDeleted, text.historyRecordDeleteFailed]
+    [text.historyRecordDeleted, text.historyRecordDeleteFailed, loadServerHistory]
   )
 
   const handleImageError = useCallback((src: string) => {
@@ -219,13 +240,15 @@ export function GenerationHistory({
   }, [])
 
   const handleClearAll = useCallback(async () => {
+    const targets = records
     await clearAllRecords()
     setRecords([])
     setSelectedIds(new Set())
     setSelectionMode(false)
-    setStorageInfo(null)
+    await deleteFilesOnDisk(targets)
+    await loadServerHistory()
     toast.success(text.historyAllCleared)
-  }, [text.historyAllCleared])
+  }, [records, text.historyAllCleared, deleteFilesOnDisk, loadServerHistory])
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -303,17 +326,12 @@ export function GenerationHistory({
         {/* 工具栏 */}
         {records.length > 0 && !loading && (
           <div className="flex items-center gap-2 px-4">
-            {storageInfo && (
-              <span className="text-xs text-muted-foreground">
-                {text.historyStorageInfo
-                  .replace("{count}", String(storageInfo.recordCount))
-                  .replace(
-                    "{suffix}",
-                    storageInfo.recordCount !== 1 ? "s" : ""
-                  )}{" "}
-                · {formatStorageMB(storageInfo.estimatedBytes)}
-              </span>
-            )}
+            <span className="text-xs text-muted-foreground">
+              {text.historyStorageInfo
+                .replace("{count}", String(displayRecords.length))
+                .replace("{suffix}", displayRecords.length !== 1 ? "s" : "")}
+              {diskBytes !== null && ` · ${formatStorageMB(diskBytes)}`}
+            </span>
             <div className="ml-auto flex items-center gap-1">
               {!selectionMode ? (
                 <Button
@@ -586,13 +604,9 @@ export function GenerationHistory({
             <div className="flex items-center justify-between pt-1">
               <span className="text-xs text-muted-foreground">
                 {text.historyStorageInfo
-                  .replace("{count}", String(storageInfo?.recordCount ?? records.length))
-                  .replace(
-                    "{suffix}",
-                    (storageInfo?.recordCount ?? 0) !== 1 ? "s" : ""
-                  )}
-                {storageInfo &&
-                  ` · ${formatStorageMB(storageInfo.estimatedBytes)}`}
+                  .replace("{count}", String(displayRecords.length))
+                  .replace("{suffix}", displayRecords.length !== 1 ? "s" : "")}
+                {diskBytes !== null && ` · ${formatStorageMB(diskBytes)}`}
               </span>
               <Button
                 size="sm"

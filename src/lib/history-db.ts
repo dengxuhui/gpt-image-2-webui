@@ -1,5 +1,6 @@
 import { openDB, type IDBPDatabase } from "idb"
 
+import { getHistoryFileName } from "@/lib/constants"
 import type { StudioResponse } from "@/lib/types"
 
 // ---- 类型 ----
@@ -124,28 +125,17 @@ export async function clearAllRecords(): Promise<void> {
   await db.clear(STORE_NAME)
 }
 
-/** 估算存储用量（记录数与二进制大小）。 */
-export async function getStorageEstimate(): Promise<{
-  recordCount: number
-  estimatedBytes: number
-}> {
-  const db = await getDB()
-  const all = await db.getAll(STORE_NAME)
-  let totalBase64Chars = 0
-
-  for (const record of all) {
-    for (const image of record.response.images) {
-      totalBase64Chars += image.src.length
-    }
-  }
-
-  // base64 编码约比原始二进制大 37%（4 字符编码 3 字节）
-  const estimatedBytes = totalBase64Chars > 0
-    ? Math.round(totalBase64Chars / 1.37)
-    : 0
-
-  return {
-    recordCount: all.length,
-    estimatedBytes,
-  }
+/**
+ * 收集记录中所有落盘图片的文件名，供服务端同步删除磁盘文件（跳过未落盘的远程 URL）。
+ *
+ * 存储用量不在这里统计：图片二进制存在服务端磁盘上，IndexedDB 只存
+ * /api/history/file/ 路径，按 src 长度估算会得出接近 0 的误导性结果。
+ * 用量由 GET /api/history 的 diskBytes 提供。
+ */
+export function collectFileNames(records: HistoryRecord[]): string[] {
+  return records.flatMap((record) =>
+    record.response.images
+      .map((image) => getHistoryFileName(image.src))
+      .filter((name): name is string => name !== null)
+  )
 }

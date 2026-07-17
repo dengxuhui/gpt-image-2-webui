@@ -1,16 +1,27 @@
 import { NextResponse } from "next/server"
 
-import { deleteServerRecord, listServerRecords } from "@/lib/server-history"
+import {
+  deleteServerRecord,
+  getDiskUsage,
+  listServerRecords,
+} from "@/lib/server-history"
 
 export const runtime = "nodejs"
 
-/** 返回服务端落盘的生成历史（MCP 生成的图片），供网页与浏览器本地历史合并展示。 */
+/**
+ * 返回服务端落盘的生成历史（MCP 生成的图片），供网页与浏览器本地历史合并展示。
+ * diskBytes 为输出目录的实际磁盘占用——图片二进制都在磁盘上，浏览器端只存路径，
+ * 因此存储用量只能由服务端统计。
+ */
 export async function GET() {
   try {
-    const records = await listServerRecords()
-    return NextResponse.json({ records })
+    const [records, diskBytes] = await Promise.all([
+      listServerRecords(),
+      getDiskUsage(),
+    ])
+    return NextResponse.json({ records, diskBytes })
   } catch {
-    return NextResponse.json({ records: [] })
+    return NextResponse.json({ records: [], diskBytes: 0 })
   }
 }
 

@@ -16,6 +16,7 @@ import {
   normalizeImageEndpoint,
   normalizeOpenAIBaseURL,
 } from "@/lib/image-request"
+import { persistImages } from "@/lib/server-history"
 
 export const runtime = "nodejs"
 export const maxDuration = 120
@@ -148,11 +149,20 @@ export async function POST(request: Request) {
       )
     }
 
+    // 落盘到 generated 目录：上游常只返回会过期的临时 URL，不落盘则浏览器历史迟早裂图。
+    // 落盘失败不阻断本次生成，退回原始 src。
+    let persistedImages = result.images
+    try {
+      persistedImages = await persistImages(result.images, outputFormat)
+    } catch {
+      // 保留原始 src
+    }
+
     return NextResponse.json({
       background: result.background,
       created: result.created,
       endpoint,
-      images: result.images,
+      images: persistedImages,
       model,
       outputFormat,
       quality: result.quality,
